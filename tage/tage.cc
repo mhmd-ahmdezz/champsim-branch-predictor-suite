@@ -1,12 +1,12 @@
 #include "tage.h"
 void tage::compute_GEHL_series()
 {
- 	L[0]   = min_hist_length ;
-    L[M-2] = max_hist_length ;
-    
+ 	const double ratio = static_cast<double>(max_hist_length) / static_cast<double>(min_hist_length);
+ 	const double alpha = std::pow(ratio, 1.0/static_cast<double>(M-2)); // Geometric Multiplier
+ 	
     for(std::size_t i=0;i<M-1;i++)
     {
-        L[i] = static_cast<std::size_t>((1.0*(pow(alpha, static_cast<double>(i)) * L[0])) + 0.5);
+        L[i] = static_cast<std::size_t>( (std::pow(alpha, static_cast<double>(i)) * static_cast<double>(min_hist_length) )+ 0.5);
     }
 }
 
@@ -77,11 +77,11 @@ bool tage::predict_branch(champsim::address ip)
 	int Tpred = -1;
 	int Taltr = -1;
 	
-	std::size_t Tpred_tag_index;
-	std::size_t Taltr_tag_index;
+	std::size_t Tpred_tag_index = 0;
+	std::size_t Taltr_tag_index = 0;
 	
-	bool provider_prediction;
-	bool alternate_prediction;
+	bool provider_prediction = false;
+	bool alternate_prediction = false;
 	
 	for(std::size_t i=0;i<M-1;i++)
 	{
@@ -96,7 +96,7 @@ bool tage::predict_branch(champsim::address ip)
 			{
 				Taltr = Tpred ;
 			}
-			Tpred = i ;
+			Tpred = static_cast<int>(i) ;
 		}
 		
 	}
@@ -105,8 +105,11 @@ bool tage::predict_branch(champsim::address ip)
 	if(!hit)
 	{
 		Tpred = -1 ; // Idicates that the tagless predictor used
+		Taltr = -1 ;
+		
 		//The provider component is the base predictor or tagless predictor
 		provider_prediction = base_predictor_value.value() > (base_predictor_value.maximum/2);
+		alternate_prediction = provider_prediction;
 	}
 	else 
 	{
@@ -116,9 +119,16 @@ bool tage::predict_branch(champsim::address ip)
 		provider_prediction = prediction_value.value() > 0 ;
 		
 		//Taltr
-		Taltr_tag_index = hash_index(ip,Taltr);
-		prediction_value = tagged_tables[Taltr][Taltr_tag_index].ctr;
-		alternate_prediction = prediction_value.value() > 0 ;
+		if(Taltr != -1)
+		{
+			Taltr_tag_index = hash_index(ip,Taltr);
+			prediction_value = tagged_tables[Taltr][Taltr_tag_index].ctr;
+			alternate_prediction = prediction_value.value() > 0 ;
+		}
+		else
+		{
+			alternate_prediction = base_predictor_value.value() > (base_predictor_value.maximum/2) ;
+		}
 	}
 	
 	
@@ -143,42 +153,42 @@ void tage::last_branch_result(champsim::address ip, champsim::address branch_tar
 	
 	
 	bool u_not_equal_zero_is_found = false;
-	
+	const bool outcome = (taken != 0);
 	
 	//Update the CSR
 	for(std::size_t i=0;i<M-1;i++)
 	{
-		idx_csr[i].update(GHR, static_cast<bool>(taken));
-		tag_csr[i].update(GHR, static_cast<bool>(taken));
+		idx_csr[i].update(GHR, outcome);
+		tag_csr[i].update(GHR, outcome);
 	}
 	
 	//Update the Global History Register
 	GHR <<= 1 ;
-	GHR.set(0,taken);
+	GHR.set(0,outcome);
 	
 	if(Tpred == -1)
 	{
 		//Tagless predictor used so we need to update its prediction counter
-		T0[hash(ip)] += (taken) ? 1 : -1;
+		T0[hash(_ip)] += (outcome) ? 1 : -1;
 	}
 	else 
 	{
 		//Tagged Component Used: 
 		
 		//Update ctr of the provider component:
-		tagged_tables[Tpred][Tpred_tag_index].ctr += (taken) ? 1 : -1;
+		tagged_tables[Tpred][Tpred_tag_index].ctr += (outcome) ? 1 : -1;
 		
 		//Check which one is correct Tpred or Taltr:
 		if(provider_prediction != alternate_prediction)
 		{
 			// Tpred - Was Correct | Talter - Was Wrong
-			if(provider_prediction == taken && alternate_prediction != taken)
+			if(provider_prediction == outcome && alternate_prediction != outcome)
 			{
 				//Update U - Counter
 				tagged_tables[Tpred][Tpred_tag_index].u += 1 ; // The Long History is valuable
 			}
 			// Tpred - Was Wrong | Talter - Was Correct
-			else if(provider_prediction != taken && alternate_prediction == taken)
+			else if(provider_prediction != outcome && alternate_prediction == outcome)
 			{
 				tagged_tables[Tpred][Tpred_tag_index].u -= 1 ; // The Long History is misleading or corrupted by noise 
 			}
@@ -186,17 +196,18 @@ void tage::last_branch_result(champsim::address ip, champsim::address branch_tar
 		
 		
 		//Misprediction Update: 
-		if(provider_prediction != taken)
+		if(provider_prediction != outcome)
 		{
 			//Allocate New Entry:
 			// Search in a longer history table at the same index for a u == 0, if multiple founds pick the shortest one.
 			for(std::size_t i = Tpred+1 ;i<M-1; i++)
 			{
-				if(tagged_tables[i][Tpred_tag_index].u == 0)
+				std::size_t table_index = hash_index(_ip, i);
+				if(tagged_tables[i][table_index].u == 0)
 				{
-					tagged_tables[i][Tpred_tag_index].tag = tagged_tables[Tpred][Tpred_tag_index].tag;
-					tagged_tables[i][Tpred_tag_index].ctr = 0 ; //weak correct
-					tagged_tables[i][Tpred_tag_index].u = 0 ; // Strongly Not Useful
+					tagged_tables[i][table_index].tag = hash_tag(_ip, i);
+					tagged_tables[i][table_index].ctr = 0 ; //weak correct
+					tagged_tables[i][table_index].u = 0 ; // Strongly Not Useful
 					
 					u_not_equal_zero_is_found = true;
 					break;
@@ -208,7 +219,7 @@ void tage::last_branch_result(champsim::address ip, champsim::address branch_tar
 				//Decrement all the tables - u - counters
 				for(std::size_t i = Tpred + 1; i<M-1 ;i++)
 				{
-					tagged_tables[i][Tpred_tag_index].u -= 1;
+					tagged_tables[i][hash_index(_ip, i)].u -= 1;
 				}
 			}	
 		}

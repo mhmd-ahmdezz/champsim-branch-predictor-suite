@@ -24,7 +24,7 @@ class tage: champsim::modules::branch_predictor
 	static constexpr std::size_t tables_index_width = N-6 ; // Number of bits to index tagged tables
 	static constexpr std::size_t min_hist_length = 5 ; // Min Length of History Lengths
 	static constexpr std::size_t max_hist_length = 130 ; // Max Length of History Lengths
- 	static constexpr  double alpha = pow((1.0*max_hist_length / min_hist_length), (1.0/(M-2))); //Geometric mutliplier
+
  	
 	static constexpr std::size_t t0_counter_bits = 2 ;
 	static constexpr std::size_t STORAGE_BUDGET = (1<<N) ; // Storage Budget is 32k bits
@@ -47,11 +47,11 @@ class tage: champsim::modules::branch_predictor
 	{
 		champsim::address ip{};
 		
-		bool provider_prediction;
-		bool alternate_prediction;
+		bool provider_prediction = false;
+		bool alternate_prediction = false;
 		
-		int Tpred;
-		int Taltr;
+		int Tpred = -1; // -1 = base predictor
+		int Taltr = -1; // -1 = base predictor
 	
 		std::size_t Tpred_tag_index;
 		std::size_t Taltr_tag_index;
@@ -72,11 +72,11 @@ class tage: champsim::modules::branch_predictor
 		std::size_t length = 0 ; // Length of the required part from GHR
 		std::size_t outpoint = 0 ; // L mod W, the position where the leaving bits sits
 		
-		void init(std::size_t L, std::size_t W)
+		void init(std::size_t hist_length, std::size_t W)
 		{
-			length = L;
+			length = hist_length;
 			width = W ;
-			outpoint = L % W;
+			outpoint = hist_length % W;
 			comp = 0 ;
 		}
 		
