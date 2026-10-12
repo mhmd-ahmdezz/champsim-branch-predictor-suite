@@ -26,10 +26,11 @@ void tage::initialize_branch_predictor()
 	
 }
 
-std::size_t tage::fold_ip(champsim::address ip, std::size_t width) const
+std::size_t tage::fold_ip(uint64_t pc, std::size_t width) const
 {
 	//Assume that ip will be always 64-bit 
-	uint64_t raw = ip.to<uint64_t>() ;
+	//uint64_t raw = ip.to<uint64_t>() ;
+	uint64_t raw = pc ;
 	raw &= (uint64_t{1} << 63) - 1 ;
 	
 	const uint64_t mask = (uint64_t{1} << width) - 1;
@@ -46,7 +47,7 @@ std::size_t tage::hash_index(champsim::address ip, std::size_t table) const
 	const std::size_t mask = (std::size_t{1} <<tables_index_width) - 1 ;
 	std::size_t result = idx_csr[table].comp ;
 	
-	result ^= fold_ip(ip, tables_index_width);
+	result ^= fold_ip(ip.to<uint64_t>(), tables_index_width);
 	result &= mask ;
 	
 	return result;
@@ -57,7 +58,8 @@ std::size_t tage::hash_tag(champsim::address ip, std::size_t table) const
 	const std::size_t mask = (std::size_t{1} << tag_width) - 1 ;
 	std::size_t result = tag_csr[table].comp ;
 	
-	result ^= fold_ip(ip, tag_width);
+	// result ^= fold_ip((ip.to<uint64_t>()>>4), tag_width);
+	result ^= fold_ip((ip.to<uint64_t>()>>4), tag_width);
 	result &= mask;
 	
 	return result;
@@ -131,13 +133,34 @@ bool tage::predict_branch(champsim::address ip)
 		}
 	}
 	
-	
+	//Take a snapshot of history register, idx_csr, and tag_csr before updating them speculatively for speculative recovery
 	// record the various values needed to update the predictor
-  	tage_state_buf.push_back({ip,provider_prediction,alternate_prediction, Tpred, Taltr, Tpred_tag_index, Taltr_tag_index});
+	
+	auto spec_GHR = GHR;
+	auto spec_idx_csr = idx_csr;
+	auto spec_tag_csr = tag_csr;
+	
+  	tage_state_buf.push_back({ip,provider_prediction,alternate_prediction, 
+  		Tpred, Taltr, Tpred_tag_index, Taltr_tag_index,
+  		spec_GHR, spec_idx_csr, spec_tag_csr});
+  		
  	if(std::size(tage_state_buf) > BUF_ENTRIES)
  	{
- 		tage_state_buf.pop_front();
+		tage_state_buf.pop_front();
  	}
+	
+	
+	//Update Index and Tag CSR with predicted outcome.
+	for(std::size_t i=0;i<M-1;i++)
+	{
+		spec_idx_csr[i].update(spec_GHR, provider_prediction);
+		spec_tag_csr[i].update(spec_GHR, provider_prediction);
+	}
+	
+	//Update the GHR speculatively with predicted outcome.
+	spec_GHR <<= 1;
+	spec_GHR.set(0, provider_prediction);
+	
 	
 	return provider_prediction;
 	
@@ -148,23 +171,49 @@ void tage::last_branch_result(champsim::address ip, champsim::address branch_tar
   	if (state == std::end(tage_state_buf))
     	return; // Skip update because state was lost
     	
-	auto [_ip, provider_prediction, alternate_prediction, Tpred, Taltr,Tpred_tag_index, Taltr_tag_index] = *state;
+	auto [_ip, provider_prediction, alternate_prediction, 
+		Tpred, Taltr,Tpred_tag_index, Taltr_tag_index,
+		spec_GHR, spec_idx_csr, spec_tag_csr] = *state;
+		
 	tage_state_buf.erase(state);
-	
 	
 	bool u_not_equal_zero_is_found = false;
 	const bool outcome = (taken != 0);
 	
-	//Update the CSR
-	for(std::size_t i=0;i<M-1;i++)
+	//Check whether the speculative prediction is correct or wrong. If it was wrong
+	// rollback to the last state (GHR, idx_csr, and tag_csr) and then update them with
+	// correct values.
+	
+	if(provider_prediction != outcome)
 	{
-		idx_csr[i].update(GHR, outcome);
-		tag_csr[i].update(GHR, outcome);
+		//Restore the last state, which's correct
+		GHR = spec_GHR;
+		idx_csr = spec_idx_csr;
+		tag_csr = spec_tag_csr;
 	}
 	
-	//Update the Global History Register
-	GHR <<= 1 ;
-	GHR.set(0,outcome);
+	
+	/*
+	auto get_prediction_time_index = [&](std::size_t table) {
+		const std::size_t mask = (std::size_t{1} << tables_index_width) - 1 ;
+		std::size_t result = spec_idx_csr[table].comp ;
+		result ^= fold_ip(_ip, tables_index_width);
+		
+		result &= mask;
+		return result;
+	};
+	
+	
+	auto get_prediction_time_tag = [&](std::size_t table) {
+		const std::size_t mask = (std::size_t{1} << tag_width) - 1 ;
+		std::size_t result = spec_tag_csr[table].comp ;
+		result ^= fold_ip(_ip, tag_width);
+		
+		result &= mask;
+		return result;
+	};
+	*/
+	
 	
 	if(Tpred == -1)
 	{
@@ -192,40 +241,49 @@ void tage::last_branch_result(champsim::address ip, champsim::address branch_tar
 			{
 				tagged_tables[Tpred][Tpred_tag_index].u -= 1 ; // The Long History is misleading or corrupted by noise 
 			}
-		} 
-		
-		
-		//Misprediction Update: 
-		if(provider_prediction != outcome)
+		} 	
+	}
+	
+	//Misprediction Update: 
+	if(provider_prediction != outcome)
+	{
+		//Allocate New Entry:
+		// Search in a longer history table at the same index for a u == 0, if multiple founds pick the shortest one.
+		for(std::size_t i = Tpred+1 ;i<M-1; i++)
 		{
-			//Allocate New Entry:
-			// Search in a longer history table at the same index for a u == 0, if multiple founds pick the shortest one.
-			for(std::size_t i = Tpred+1 ;i<M-1; i++)
+			std::size_t table_index = hash_index(_ip, i);
+			if(tagged_tables[i][table_index].u == 0)
 			{
-				std::size_t table_index = hash_index(_ip, i);
-				if(tagged_tables[i][table_index].u == 0)
-				{
-					tagged_tables[i][table_index].tag = hash_tag(_ip, i);
-					tagged_tables[i][table_index].ctr = 0 ; //weak correct
-					tagged_tables[i][table_index].u = 0 ; // Strongly Not Useful
-					
-					u_not_equal_zero_is_found = true;
-					break;
-				}
+				tagged_tables[i][table_index].tag = hash_tag(_ip, i);
+				tagged_tables[i][table_index].ctr = 0 ; //weak correct
+				tagged_tables[i][table_index].u = 0 ; // Strongly Not Useful
+				
+				u_not_equal_zero_is_found = true;
+				break;
 			}
-			
-			if(!u_not_equal_zero_is_found)
-			{
-				//Decrement all the tables - u - counters
-				for(std::size_t i = Tpred + 1; i<M-1 ;i++)
-				{
-					tagged_tables[i][hash_index(_ip, i)].u -= 1;
-				}
-			}	
 		}
+		
+		if(!u_not_equal_zero_is_found)
+		{
+			//Decrement all the tables - u - counters
+			for(std::size_t i = Tpred + 1; i<M-1 ;i++)
+			{
+				tagged_tables[i][hash_index(_ip, i)].u -= 1;
+			}
+		}
+		
 	}
 	
 	
+	for(std::size_t i=0;i<M-1;i++)
+	{
+		idx_csr[i].update(GHR, outcome);
+		tag_csr[i].update(GHR, outcome);
+	}
+		
+	//Update the Global History Register
+	GHR <<= 1 ;
+	GHR.set(0,outcome);
 	
 	
 }

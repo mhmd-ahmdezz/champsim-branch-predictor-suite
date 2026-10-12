@@ -35,6 +35,7 @@ class tage: champsim::modules::branch_predictor
 	static constexpr std::size_t u_width = 2   ; // Useful Counter width
 	static constexpr std::size_t tagged_entries = (1 << (N-6)) ; // number of tagged Ti entries
 	
+	// static constexpr std::size_t BUF_ENTRIES = ( std::size_t{1} << 15);
 	static constexpr std::size_t BUF_ENTRIES = 100;
 	
 	struct tagged_table_entry{
@@ -42,22 +43,6 @@ class tage: champsim::modules::branch_predictor
 		champsim::msl::sfwcounter<ctr_width> ctr ;
 		champsim::msl::fwcounter<u_width> u ;
 	};
-	
-	struct tage_state
-	{
-		champsim::address ip{};
-		
-		bool provider_prediction = false;
-		bool alternate_prediction = false;
-		
-		int Tpred = -1; // -1 = base predictor
-		int Taltr = -1; // -1 = base predictor
-	
-		std::size_t Tpred_tag_index;
-		std::size_t Taltr_tag_index;
-	};
-	
-	std::deque<tage_state> tage_state_buf;
 	
 	
 	std::array<std::size_t, M-1> L; // Array contains the History Lengths
@@ -93,13 +78,36 @@ class tage: champsim::modules::branch_predictor
 	
 	std::array<folded_history, M-1> idx_csr; //CSR for index, width = tables_index_width
 	std::array<folded_history, M-1> tag_csr; //CSR for Tag, width = tag_width
+	
+	struct tage_state
+	{
+		champsim::address ip{};
+		
+		bool provider_prediction = false;
+		bool alternate_prediction = false;
+		
+		int Tpred = -1; // -1 = base predictor
+		int Taltr = -1; // -1 = base predictor
+	
+		std::size_t Tpred_tag_index;
+		std::size_t Taltr_tag_index;
+		
+		//For Speculative Recovery
+		std::bitset<max_hist_length> snapshot_ghr;
+		std::array<folded_history, M-1> snapshot_idx_csr;
+		std::array<folded_history, M-1> snapshot_tag_csr;
+	};
+	
+	std::deque<tage_state> tage_state_buf;
+	
 public:
 	using branch_predictor::branch_predictor;
 	void initialize_branch_predictor();
 	bool predict_branch(champsim::address ip);
 	void last_branch_result(champsim::address ip, champsim::address branch_target, uint8_t taken, uint8_t branch_type);
 	void compute_GEHL_series();
-	std::size_t fold_ip(champsim::address ip, std::size_t width)const;
+	//std::size_t fold_ip(champsim::address ip, std::size_t width)const;
+	std::size_t fold_ip(uint64_t pc, std::size_t width) const;
 	std::size_t hash_index(champsim::address ip, std::size_t table) const;
 	std::size_t hash_tag(champsim::address ip, std::size_t table) const;
 };
