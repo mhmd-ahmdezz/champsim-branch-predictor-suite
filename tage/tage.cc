@@ -59,7 +59,7 @@ std::size_t tage::hash_tag(champsim::address ip, std::size_t table) const
 	std::size_t result = tag_csr[table].comp ;
 	
 	// result ^= fold_ip((ip.to<uint64_t>()>>4), tag_width);
-	result ^= fold_ip((ip.to<uint64_t>()>>4), tag_width);
+	result ^= fold_ip((ip.to<uint64_t>()>>2), tag_width);
 	result &= mask;
 	
 	return result;
